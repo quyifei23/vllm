@@ -148,6 +148,20 @@ class EngineCore:
             log_stats=self.log_stats,
             block_size=scheduler_block_size,
         )
+
+        # Setup Bidaw I/O-aware scheduler when enabled.
+        if vllm_config.bidaw_config.enable_bidaw:
+            from vllm.bidaw import BidawScheduler
+
+            self.bidaw_scheduler: BidawScheduler | None = BidawScheduler(
+                kv_size_unit=vllm_config.bidaw_config.kv_size_unit,
+                skip_oversize_requests=vllm_config.bidaw_config.skip_oversize_requests,
+                max_kv_size_bytes=vllm_config.cache_config.block_size * 1024,
+                is_mha_model=vllm_config.bidaw_config.is_mha_model,
+            )
+        else:
+            self.bidaw_scheduler = None
+
         self.use_spec_decode = vllm_config.speculative_config is not None
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore

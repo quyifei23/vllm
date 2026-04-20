@@ -3692,6 +3692,92 @@ class GPUModelRunner(
                 pyt_hooks.register_hooks(self.model, self.model.__class__.__name__)
                 self.layerwise_nvtx_hooks_registered = True
 
+    def _register_bidaw_tensor_cache(self) -> None:
+        """
+        Register Bidaw tensor cache hooks on RMSNorm layers.
+
+        Captures normalized activations (tensor 6) for storage-efficient
+        caching. Skipped when CUDA graphs or STOCK_TORCH_COMPILE is active
+        (hooks are not compatible with these modes).
+        """
+        from functools import partial
+
+        from vllm.bidaw.tensor_cache import (
+            BidawTensorCacher,
+            _find_attention_layernorms,
+            _find_qkv_weights,
+        )
+
+        # Skip if incompatible compilation mode is active
+        if (
+            self.vllm_config.compilation_config.mode
+            == CompilationMode.STOCK_TORCH_COMPILE
+        ):
+            logger.debug_once(
+                "Bidaw tensor cache is not supported with STOCK_TORCH_COMPILE, "
+                "skipping hook registration"
+            )
+            return
+
+        if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            logger.debug_once(
+                "Bidaw tensor cache is not supported with CUDA graphs, "
+                "skipping hook registration"
+            )
+            return
+
+        bidaw_config = self.vllm_config.bidaw_config
+        self.bidaw_tensor_cacher = BidawTensorCacher(
+            hidden_size=self.model_config.get_hidden_size(),
+            num_layers=self.model_config.get_num_layers(),
+            dtype=self.model_config.dtype,
+            memory_gb=bidaw_config.tensor_cache_memory_gb,
+        )
+
+        layernorms = _find_attention_layernorms(self.model)
+        qkv_weights = _find_qkv_weights(self.model)
+
+        for layer_id, (norm, _) in layernorms.items():
+            w_k, w_v = qkv_weights.get(layer_id, (None, None))
+            self.bidaw_tensor_cacher.register_layer_weights(layer_id, w_k, w_v)
+            norm.register_forward_hook(
+                partial(self._bidaw_capture_hook, layer_id)
+            )
+
+        logger.info(
+            "Bidaw tensor cache registered: %d layers, hidden_size=%d",
+            len(layernorms),
+            self.model_config.get_hidden_size(),
+        )
+
+    def _bidaw_capture_hook(
+        self,
+        layer_id: int,
+        module: torch.nn.Module,
+        args: tuple,
+        output: torch.Tensor | tuple,
+    ) -> None:
+        """
+        Forward hook to capture normalized activations from RMSNorm layers.
+
+        The output of input_layernorm (before QKV projection) is tensor 6.
+        """
+        if isinstance(output, tuple):
+            norm_act = output[0]
+        else:
+            norm_act = output
+
+        if not norm_act.is_cuda:
+            return
+
+        # Capture tensor to CPU buffer
+        if hasattr(self, "bidaw_tensor_cacher"):
+            self.bidaw_tensor_cacher.store_tensor(
+                layer_id=layer_id,
+                token_start=0,
+                norm_act=norm_act.detach(),
+            )
+
     def _get_slot_mappings(
         self,
         num_tokens_padded: int,
@@ -4852,6 +4938,13 @@ class GPUModelRunner(
             )
             if self.eplb_state.is_async:
                 self.eplb_state.start_async_loop()
+
+        # Register Bidaw tensor cache hooks for storage-efficient tensor caching.
+        if (
+            self.vllm_config.bidaw_config.enable_bidaw
+            and self.vllm_config.bidaw_config.enable_storage_efficient_tensor
+        ):
+            self._register_bidaw_tensor_cache()
 
         if (
             self.vllm_config.compilation_config.mode

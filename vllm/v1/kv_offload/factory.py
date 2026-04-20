@@ -56,3 +56,6 @@ class OffloadingSpecFactory:
 OffloadingSpecFactory.register_spec(
     "CPUOffloadingSpec", "vllm.v1.kv_offload.cpu.spec", "CPUOffloadingSpec"
 )
+OffloadingSpecFactory.register_spec(
+    "BidawOffloadingSpec", "vllm.bidaw.ssd.spec", "BidawOffloadingSpec"
+)

@@ -48,8 +48,8 @@ class BidawOffloadingSpec(OffloadingSpec):
         self._max_ssd_blocks = int(self.extra_config.get("max_ssd_blocks", 100000))
 
         parallel_config = vllm_config.parallel_config
-        self._tp_rank = parallel_config.rank
-        self._pp_rank = 0  # PP rank is managed elsewhere
+        self._tp_rank = parallel_config.rank // parallel_config.pipeline_parallel_size
+        self._pp_rank = parallel_config.rank % parallel_config.pipeline_parallel_size
 
         # scheduler-side
         self._manager: BidawOffloadingManager | None = None
