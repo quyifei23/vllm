@@ -10,7 +10,7 @@ Wraps the v1 BlockPool to provide big/small block allocation with
 split/merge logic.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
@@ -180,15 +180,16 @@ class BidawBlockAllocator:
 
     def free_block(self, block_id: int) -> None:
         """
-        Free a block and return it to the pool.
+        Free a block from type tracking.
+
+        Note: The underlying BlockPool handles the actual free operation
+        through its free_block_queue when the block's ref_cnt drops to 0.
+        This method only removes the type tracking entry.
 
         Args:
             block_id: The ID of the block to free.
         """
-        if block_id in self._block_types:
-            del self._block_types[block_id]
-        # The underlying BlockPool handles the actual free operation
-        # through its free_block_queue when the block's ref_cnt drops to 0
+        self._block_types.pop(block_id, None)
 
     def get_block_type(self, block_id: int) -> BlockType | None:
         """Get the type of a block by its ID."""

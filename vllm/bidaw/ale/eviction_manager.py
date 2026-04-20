@@ -11,15 +11,15 @@ Implements the Answer-Length-based Eviction (ALE) policy from paper §3.3:
 Trigger: when free host memory falls below eviction_threshold (5% default).
 """
 
-import logging
 from collections import defaultdict
 
 from vllm.bidaw.ale.answer_length_predictor import AnswerLengthReusePredictor
 from vllm.bidaw.ale.ghost_cache import GhostCache
 from vllm.bidaw.ale.reuse_tracker import WeightedReuseDistanceTracker
 from vllm.bidaw.config import BidawConfig
+from vllm.logger import init_logger
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 
 class BidawEvictionManager:

@@ -25,7 +25,6 @@ from vllm.v1.kv_offload.abstract import (
     OffloadingManager,
     PrepareStoreOutput,
 )
-from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
 
 from vllm.bidaw.ssd.mediums import SSDLoadStoreSpec
 
@@ -128,9 +127,9 @@ class BidawOffloadingManager(OffloadingManager):
         should be retried.
         """
         count = 0
-        for bh in block_hashes:
-            key = self._block_hash_to_key(bh)
-            with self._lock:
+        with self._lock:
+            for bh in block_hashes:
+                key = self._block_hash_to_key(bh)
                 if key in self._offloaded_blocks:
                     count += 1
                     # Update LRU

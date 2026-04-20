@@ -6,7 +6,7 @@ Bidaw: I/O-Aware KV Cache Management for Interactive LLM Serving
 Based on the paper "Bidaw: I/O-Aware KV Cache Management for Interactive LLM Serving"
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from vllm.utils.hashing import safe_hash
 

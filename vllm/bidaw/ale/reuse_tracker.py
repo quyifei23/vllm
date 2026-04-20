@@ -70,18 +70,19 @@ class WeightedReuseDistanceTracker:
         Sum the kv_size_bytes of all unique users (excluding user_id)
         that were accessed in (start_pos, end_pos).
         """
+        # Convert global positions to deque indices
+        history_start = self._global_pos - len(self._access_log)
         seen_users: set[str] = set()
         total_size = 0
         for pos in range(start_pos + 1, end_pos):
-            # Map global position to access_log index
-            log_idx = pos % self._access_log.maxlen if self._access_log.maxlen else pos
-            if pos >= self._global_pos - len(self._access_log):
-                access_user, access_size = self._access_log[
-                    pos - (self._global_pos - len(self._access_log))
-                ]
-                if access_user != user_id and access_user not in seen_users:
-                    seen_users.add(access_user)
-                    total_size += access_size
+            if pos < history_start:
+                # Position has been evicted from the circular buffer
+                continue
+            log_idx = pos - history_start
+            access_user, access_size = self._access_log[log_idx]
+            if access_user != user_id and access_user not in seen_users:
+                seen_users.add(access_user)
+                total_size += access_size
         return float(total_size)
 
     def get_user_wrd_distribution(self, user_id: str) -> list[float]:
