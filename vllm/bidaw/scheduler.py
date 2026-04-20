@@ -15,16 +15,14 @@ when their SSD load completes, and schedules from ready_queue using
 disk-HRRN to balance fairness and I/O efficiency.
 """
 
+import heapq
 import time
-from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.v1.core.kv_cache_manager import KVCacheManager
-    from vllm.v1.core.sched.request_queue import RequestQueue
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -32,63 +30,84 @@ logger = init_logger(__name__)
 
 class RequestQueue:
     """
-    A simple priority queue for Bidaw scheduling.
+    A priority queue for Bidaw scheduling using a min-heap.
 
     Requests are ordered by disk-HRRN score (higher = more urgent).
+    We negate scores to use Python's min-heap as a max-heap.
     """
 
     def __init__(self) -> None:
-        self._queue: deque["Request"] = deque()
-        self._scores: dict[str, float] = {}
+        # Heap of (-score, request) tuples
+        self._heap: list[tuple[float, "Request"]] = []
+        # Track valid entries for lazy removal
+        self._valid_ids: set[str] = set()
 
     def add_request(self, request: "Request", score: float = 0.0) -> None:
         """Add a request with its HRRN score."""
-        self._queue.append(request)
-        self._scores[request.request_id] = score
+        # Negate score for max-heap behavior
+        heapq.heappush(self._heap, (-score, request))
+        self._valid_ids.add(request.request_id)
 
     def remove_request(self, request_id: str) -> "Request | None":
-        """Remove and return a request by ID."""
-        for i, req in enumerate(self._queue):
+        """Lazily remove and return a request by ID."""
+        if request_id not in self._valid_ids:
+            return None
+        self._valid_ids.discard(request_id)
+        # Find the request to return it
+        for _, req in self._heap:
             if req.request_id == request_id:
-                self._queue.remove(req)
-                self._scores.pop(request_id, None)
                 return req
         return None
 
     def peek_request(self) -> "Request | None":
         """Return the highest-priority request without removing it."""
-        if not self._queue:
+        self._clean_heap()
+        if not self._heap:
             return None
-        # Return the request with the highest HRRN score
-        best_req = max(self._queue, key=lambda r: self._scores.get(r.request_id, 0))
-        return best_req
+        return self._heap[0][1]
 
     def pop_request(self) -> "Request | None":
         """Remove and return the highest-priority request."""
-        req = self.peek_request()
-        if req is not None:
-            self.remove_request(req.request_id)
+        self._clean_heap()
+        if not self._heap:
+            return None
+        _, req = heapq.heappop(self._heap)
+        self._valid_ids.discard(req.request_id)
         return req
+
+    def _clean_heap(self) -> None:
+        """Remove invalid entries from the top of the heap."""
+        while self._heap and self._heap[0][1].request_id not in self._valid_ids:
+            heapq.heappop(self._heap)
 
     def get_request(self, request_id: str) -> "Request | None":
         """Get a request by ID without removing it."""
-        for req in self._queue:
-            if req.request_id == request_id:
+        for _, req in self._heap:
+            if req.request_id == request_id and req.request_id in self._valid_ids:
                 return req
         return None
 
     def __len__(self) -> int:
-        return len(self._queue)
+        return len(self._valid_ids)
 
     def __bool__(self) -> bool:
-        return len(self._queue) > 0
+        return len(self._valid_ids) > 0
 
     def __iter__(self):
-        return iter(self._queue)
+        for _, req in self._heap:
+            if req.request_id in self._valid_ids:
+                yield req
 
     def update_score(self, request_id: str, score: float) -> None:
-        """Update the HRRN score for a request."""
-        self._scores[request_id] = score
+        """Update the HRRN score for a request (lazy removal + re-add)."""
+        # Lazy remove
+        self._valid_ids.discard(request_id)
+        # Find the request to re-add it
+        for _, req in self._heap:
+            if req.request_id == request_id:
+                heapq.heappush(self._heap, (-score, req))
+                self._valid_ids.add(request_id)
+                break
 
 
 class DiskHRRNScorer:

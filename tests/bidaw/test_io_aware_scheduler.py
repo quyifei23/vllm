@@ -11,7 +11,6 @@ Covers:
 """
 
 import time
-import pytest
 from unittest.mock import MagicMock
 
 from vllm.bidaw.scheduler import (
@@ -208,7 +207,10 @@ class TestBidawScheduler:
         assert status.load_start_time > 0
 
     def test_should_skip_oversize_request(self):
-        sched = self._make_scheduler()
+        sched = BidawScheduler(
+            skip_oversize_requests=True,
+            max_kv_size_bytes=1e6,  # 1MB
+        )
         # Large request (100000 tokens * 100 bytes = 10MB > 1MB max)
         req = make_mock_request("req_1", num_prompt_tokens=100000)
         assert sched.should_skip_request(req) is True
@@ -241,8 +243,7 @@ class TestBidawScheduler:
 
         old_score1 = sched.get_disk_hrrn_score("req_1")
         # Wait a tiny bit to let time pass
-        import time as _time
-        _time.sleep(0.01)
+        time.sleep(0.01)
         sched.update_scores()
         new_score1 = sched.get_disk_hrrn_score("req_1")
         # Score should have increased (wait time increased)
