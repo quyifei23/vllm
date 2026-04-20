@@ -9,6 +9,7 @@ from vllm.bidaw.ale import (
 )
 from vllm.bidaw.block_allocator import BidawBlockAllocator
 from vllm.bidaw.config import BidawConfig
+from vllm.bidaw.scheduler import BidawScheduler, DiskHRRNScorer, RequestQueue, SSDLoadStatus
 from vllm.bidaw.ssd import (
     BidawOffloadingManager,
     BidawOffloadingSpec,
@@ -23,8 +24,12 @@ __all__ = [
     "BidawEvictionManager",
     "BidawOffloadingManager",
     "BidawOffloadingSpec",
+    "BidawScheduler",
+    "DiskHRRNScorer",
     "GhostCache",
+    "RequestQueue",
     "SSDGPUOffloadingHandler",
+    "SSDLoadStatus",
     "SSDLoadStoreSpec",
     "WeightedReuseDistanceTracker",
 ]
