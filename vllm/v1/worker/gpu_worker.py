@@ -532,9 +532,12 @@ class Worker(WorkerBase):
                 from vllm.config.kv_transfer import KVTransferConfig
 
                 self.vllm_config.kv_transfer_config = KVTransferConfig()
+            self.vllm_config.kv_transfer_config.kv_connector = "OffloadingConnector"
             self.vllm_config.kv_transfer_config.kv_connector_extra_config[
                 "spec_name"
             ] = "BidawOffloadingSpec"
+            # OffloadingConnector doesn't support HMA
+            self.vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = True
             self.vllm_config.kv_transfer_config.kv_connector_extra_config.update(
                 {
                     "ssd_cache_dir": self.vllm_config.bidaw_config.ssd_cache_dir,
