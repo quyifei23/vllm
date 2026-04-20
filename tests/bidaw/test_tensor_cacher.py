@@ -202,11 +202,16 @@ class TestFindAttentionLayernorms:
     def test_find_layernorms_in_mock_model(self):
         from vllm.model_executor.layers.layernorm import RMSNorm
 
+        # Mock RMSNorm that passes isinstance() but avoids CustomOp init
+        class MockRMSNorm(RMSNorm):
+            def __init__(self, dim: int, eps: float = 1e-5):
+                nn.Module.__init__(self)
+
         class MockDecoderLayer(nn.Module):
             def __init__(self):
                 super().__init__()
-                self.input_layernorm = RMSNorm(128)
-                self.post_attention_layernorm = RMSNorm(128)
+                self.input_layernorm = MockRMSNorm(128)
+                self.post_attention_layernorm = MockRMSNorm(128)
 
         class MockModel(nn.Module):
             def __init__(self, num_layers):

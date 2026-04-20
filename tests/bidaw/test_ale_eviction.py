@@ -145,7 +145,7 @@ class TestGhostCache:
     def test_wrd_to_bucket_extreme(self):
         gc = GhostCache(perf_layer_size_bytes=10000)
         bucket = gc._wrd_to_bucket(999999.0)
-        assert bucket == gc.get_bucket_count()  # extreme bucket
+        assert bucket == gc.get_bucket_count() - 1  # extreme bucket (last index)
 
     def test_record_access_with_wrd(self):
         gc = GhostCache(perf_layer_size_bytes=10000)

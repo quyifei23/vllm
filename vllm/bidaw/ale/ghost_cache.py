@@ -63,13 +63,12 @@ class GhostCache:
 
     def _compute_bucket_boundaries(self) -> list[float]:
         """Compute the boundaries for each WRD bucket."""
-        boundaries = [0.0, float(self._perf_layer_size)]
-        # Promising buckets: evenly spaced above perf_layer_size up to 10x
+        # Bucket 0: [0, perf_layer_size), Bucket 1+: evenly spaced above
+        boundaries = [float(self._perf_layer_size)]
         max_wrd = self._perf_layer_size * 10
         step = (max_wrd - self._perf_layer_size) / max(1, self._num_promising_buckets)
-        for i in range(1, self._num_promising_buckets):
+        for i in range(1, self._num_promising_buckets + 1):
             boundaries.append(self._perf_layer_size + step * i)
-        boundaries.append(max_wrd)  # extreme boundary
         return boundaries
 
     def record_access(self, user_id: str, kv_size_bytes: int) -> int:
@@ -122,7 +121,7 @@ class GhostCache:
 
     def get_bucket_count(self) -> int:
         """Return the total number of buckets."""
-        return len(self._bucket_boundaries) - 1
+        return len(self._bucket_boundaries)
 
     def get_num_promising_buckets(self) -> int:
         """Return the number of promising buckets."""

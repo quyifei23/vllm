@@ -71,7 +71,8 @@ class WeightedReuseDistanceTracker:
         that were accessed in (start_pos, end_pos).
         """
         # Convert global positions to deque indices
-        history_start = self._global_pos - len(self._access_log)
+        # First element in deque is at global position: global_pos - len + 1
+        history_start = self._global_pos - len(self._access_log) + 1
         seen_users: set[str] = set()
         total_size = 0
         for pos in range(start_pos + 1, end_pos):

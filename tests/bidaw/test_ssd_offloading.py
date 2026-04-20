@@ -42,14 +42,15 @@ class TestSSDLoadStoreSpec:
 
 class TestBidawOffloadingManager:
     def _make_manager(self, ssd_dir: str = "/tmp/test_bidaw_ssd", **kwargs):
-        return BidawOffloadingManager(
-            ssd_cache_dir=ssd_dir,
-            ssd_io_threads=2,
-            max_blocks=10,
-            tp_rank=0,
-            pp_rank=0,
-            **kwargs,
-        )
+        defaults = {
+            "ssd_cache_dir": ssd_dir,
+            "ssd_io_threads": 2,
+            "max_blocks": 10,
+            "tp_rank": 0,
+            "pp_rank": 0,
+        }
+        defaults.update(kwargs)
+        return BidawOffloadingManager(**defaults)
 
     def test_create_manager_creates_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -116,11 +116,16 @@ class TestTensorCacheHookRegistration:
         from vllm.bidaw.tensor_cache import _find_attention_layernorms
         from vllm.model_executor.layers.layernorm import RMSNorm
 
+        # Mock RMSNorm that passes isinstance() but avoids CustomOp init
+        class MockRMSNorm(RMSNorm):
+            def __init__(self, dim: int, eps: float = 1e-5):
+                nn.Module.__init__(self)
+
         class MockLayer(nn.Module):
             def __init__(self):
                 super().__init__()
-                self.input_layernorm = RMSNorm(128)
-                self.post_attention_layernorm = RMSNorm(128)
+                self.input_layernorm = MockRMSNorm(128)
+                self.post_attention_layernorm = MockRMSNorm(128)
 
         class MockModel(nn.Module):
             def __init__(self):
@@ -134,6 +139,7 @@ class TestTensorCacheHookRegistration:
         assert len(layernorms) == 8
 
     def test_qkv_weight_extraction_on_mock_model(self):
+        import torch
         import torch.nn as nn
         from vllm.bidaw.tensor_cache import _find_qkv_weights
 
