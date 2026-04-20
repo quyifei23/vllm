@@ -121,12 +121,19 @@ class TestDiskHRRNScorer:
         score = scorer.compute_score(req, kv_size=0)
         assert score == float("inf")
 
-    def test_estimate_kv_size(self):
-        scorer = DiskHRRNScorer()
+    def test_estimate_kv_size_mha(self):
+        scorer = DiskHRRNScorer(is_mha_model=True)
         req = make_mock_request("req_1", num_prompt_tokens=1000)
         kv_size = scorer._estimate_kv_size(req)
-        # Should be roughly 1000 * 100 = 100000
+        # MHA: 1000 * 50 = 50000 (tensor 6, half of full KV)
         assert kv_size > 0
+        assert kv_size == 1000 * 50.0
+
+    def test_estimate_kv_size_gqa(self):
+        scorer = DiskHRRNScorer(is_mha_model=False)
+        req = make_mock_request("req_1", num_prompt_tokens=1000)
+        kv_size = scorer._estimate_kv_size(req)
+        # GQA: 1000 * 100 = 100000 (full KV)
         assert kv_size == 1000 * 100.0
 
 
@@ -267,3 +274,16 @@ class TestBidawScheduler:
     def test_get_disk_hrrn_score_nonexistent(self):
         sched = self._make_scheduler()
         assert sched.get_disk_hrrn_score("nonexistent") == 0.0
+
+    def test_mha_model_smaller_kv_estimate(self):
+        """MHA models should have smaller KV size estimate (tensor 6)."""
+        from vllm.bidaw.scheduler import DiskHRRNScorer
+
+        scorer_mha = DiskHRRNScorer(is_mha_model=True)
+        scorer_gqa = DiskHRRNScorer(is_mha_model=False)
+        req = make_mock_request("req_1", num_prompt_tokens=1000)
+
+        size_mha = scorer_mha._estimate_kv_size(req)
+        size_gqa = scorer_gqa._estimate_kv_size(req)
+        # MHA should be half of GQA (tensor 6 vs full KV)
+        assert size_mha == size_gqa / 2

@@ -123,8 +123,11 @@ class DiskHRRNScorer:
         - kv_size_unit: normalization constant from config
     """
 
-    def __init__(self, kv_size_unit: float = 1e8) -> None:
+    def __init__(
+        self, kv_size_unit: float = 1e8, is_mha_model: bool = True
+    ) -> None:
         self._kv_size_unit = kv_size_unit
+        self._is_mha_model = is_mha_model
 
     def compute_score(self, request: "Request", kv_size: float | None = None) -> float:
         """
@@ -153,12 +156,13 @@ class DiskHRRNScorer:
         """
         Estimate the KV cache size for a request.
 
-        Rough estimate: num_tokens * num_layers * hidden_size * 2 * bytes_per_elem
+        For MHA models with tensor 6 caching: ~50 bytes/token
+        (hidden_size * dtype_bytes, half of full KV).
+        For GQA models: ~100 bytes/token (full KV).
         """
         num_tokens = request.num_prompt_tokens
-        # Use a simple per-token estimate (~100 bytes/token for typical model)
-        # This is a rough approximation; the actual size depends on model config.
-        bytes_per_token = 100.0
+        # MHA with tensor 6: half the size of full KV cache
+        bytes_per_token = 50.0 if self._is_mha_model else 100.0
         return num_tokens * bytes_per_token
 
 
@@ -202,10 +206,13 @@ class BidawScheduler:
         kv_size_unit: float = 1e8,
         skip_oversize_requests: bool = True,
         max_kv_size_bytes: float = 0,
+        is_mha_model: bool = True,
     ) -> None:
         self._ready_queue = RequestQueue()
         self._preparing_queue = RequestQueue()
-        self._scorer = DiskHRRNScorer(kv_size_unit=kv_size_unit)
+        self._scorer = DiskHRRNScorer(
+            kv_size_unit=kv_size_unit, is_mha_model=is_mha_model
+        )
         self._skip_oversize = skip_oversize_requests
         self._max_kv_size_bytes = max_kv_size_bytes
 
@@ -279,8 +286,13 @@ class BidawScheduler:
             self._load_status[request_id].load_start_time = time.monotonic()
 
     def _estimate_request_kv_size(self, request: "Request") -> float:
-        """Estimate the KV cache size for a request in bytes."""
+        """Estimate the KV cache size for a request in bytes (uses scorer's estimate)."""
         return self._scorer._estimate_kv_size(request)
+
+    def _estimate_full_kv_size(self, request: "Request") -> float:
+        """Estimate full KV size regardless of tensor 6 caching (for oversize check)."""
+        num_tokens = request.num_prompt_tokens
+        return num_tokens * 100.0  # full KV: ~100 bytes/token
 
     def should_skip_request(self, request: "Request") -> bool:
         """
@@ -295,7 +307,7 @@ class BidawScheduler:
         if not self._skip_oversize or self._max_kv_size_bytes <= 0:
             return False
 
-        kv_size = self._estimate_request_kv_size(request)
+        kv_size = self._estimate_full_kv_size(request)
         return kv_size > self._max_kv_size_bytes
 
     def get_ready_queue(self) -> RequestQueue:
