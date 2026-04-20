@@ -9,12 +9,22 @@ from vllm.bidaw.ale import (
 )
 from vllm.bidaw.block_allocator import BidawBlockAllocator
 from vllm.bidaw.config import BidawConfig
+from vllm.bidaw.ssd import (
+    BidawOffloadingManager,
+    BidawOffloadingSpec,
+    SSDGPUOffloadingHandler,
+    SSDLoadStoreSpec,
+)
 
 __all__ = [
     "AnswerLengthReusePredictor",
     "BidawBlockAllocator",
     "BidawConfig",
     "BidawEvictionManager",
+    "BidawOffloadingManager",
+    "BidawOffloadingSpec",
     "GhostCache",
+    "SSDGPUOffloadingHandler",
+    "SSDLoadStoreSpec",
     "WeightedReuseDistanceTracker",
 ]
