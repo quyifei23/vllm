@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Bidaw: I/O-Aware KV Cache Management for Interactive LLM Serving
@@ -8,6 +7,8 @@ Based on the paper "Bidaw: I/O-Aware KV Cache Management for Interactive LLM Ser
 """
 
 from dataclasses import dataclass, field
+
+from vllm.utils.hashing import safe_hash
 
 
 @dataclass
@@ -87,3 +88,28 @@ class BidawConfig:
     # ── Tensor Cache Memory ────────────────────────────────────────
     tensor_cache_memory_gb: float = 0.0
     """Max memory (GB) for storage-efficient tensor cache. 0 = auto."""
+
+    def compute_hash(self) -> str:
+        """Compute a hash string representing this config's state."""
+        factors = [
+            self.enable_bidaw,
+            self.enable_io_aware_scheduling,
+            self.kv_size_unit,
+            self.skip_oversize_requests,
+            self.enable_answer_length_eviction,
+            self.num_promising_buckets,
+            self.eviction_threshold,
+            self.ghost_cache_history_size,
+            self.enable_storage_efficient_tensor,
+            self.is_mha_model,
+            self.transform_stream_priority,
+            self.big_block_size,
+            self.small_block_size,
+            self.tensor_parallel_size,
+            self.pipeline_parallel_size,
+            self.ssd_cache_dir,
+            self.ssd_io_threads,
+            self.enable_inclusive_caching,
+            self.tensor_cache_memory_gb,
+        ]
+        return safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]

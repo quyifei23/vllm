@@ -30,7 +30,6 @@ from vllm.utils.hashing import safe_hash
 from .attention import AttentionConfig
 from .bidaw import BidawConfig
 from .cache import CacheConfig
-from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
 from .ec_transfer import ECTransferConfig
@@ -385,7 +384,7 @@ class VllmConfig:
         else:
             vllm_factors.append("None")
         if self.bidaw_config and self.bidaw_config.enable_bidaw:
-            vllm_factors.append(self.bidaw_config)
+            vllm_factors.append(self.bidaw_config.compute_hash())
         if self.device_config:
             vllm_factors.append(self.device_config.compute_hash())
         else:
