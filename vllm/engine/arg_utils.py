@@ -34,6 +34,7 @@ from typing_extensions import TypeIs
 import vllm.envs as envs
 from vllm.config import (
     AttentionConfig,
+    BidawConfig,
     CacheConfig,
     CompilationConfig,
     ConfigType,
@@ -628,6 +629,58 @@ class EngineArgs:
     tokens_only: bool = False
 
     shutdown_timeout: int = 0
+
+    # ── Bidaw I/O-Aware KV Cache Management ────────────────────────
+    enable_bidaw: bool = False
+    """Master switch to enable Bidaw features."""
+
+    enable_io_aware_scheduling: bool = True
+    """Enable dual-queue (ready/preparing) scheduling with disk-HRRN."""
+
+    kv_size_unit: float = 1e8
+    """Unit (bytes) for kv_size in disk-HRRN ratio calculation."""
+
+    skip_oversize_requests: bool = True
+    """Skip requests that don't fit in current GPU memory."""
+
+    enable_answer_length_eviction: bool = True
+    """Enable ALE eviction policy using previous-round answer length."""
+
+    num_promising_buckets: int = 20
+    """Number of weighted reuse distance buckets in ghost cache."""
+
+    eviction_threshold: float = 0.05
+    """Trigger eviction when free host memory falls below this ratio."""
+
+    ghost_cache_history_size: int = 10000
+    """Historical trace length for ghost cache statistics."""
+
+    enable_storage_efficient_tensor: bool = True
+    """Cache storage-efficient tensors (normalized activations) instead of KV."""
+
+    is_mha_model: bool = True
+    """Whether the model uses MHA (True) or GQA (False)."""
+
+    transform_stream_priority: int = -1
+    """CUDA stream priority for tensor6→KV reconstruction."""
+
+    big_block_size: int = 256
+    """Token count per big block for history and query tokens."""
+
+    small_block_size: int = 16
+    """Token count per small block for response tokens."""
+
+    ssd_cache_dir: str = "/tmp/bidaw_kv_cache"
+    """Directory for SSD-based KV cache (capacity layer)."""
+
+    ssd_io_threads: int = 4
+    """Number of threads for async SSD I/O operations."""
+
+    enable_inclusive_caching: bool = True
+    """Keep copies in performance layer when evicting to capacity layer."""
+
+    tensor_cache_memory_gb: float = 0.0
+    """Max memory (GB) for storage-efficient tensor cache. 0 = auto."""
 
     weight_transfer_config: WeightTransferConfig | None = get_field(
         VllmConfig,
@@ -1333,6 +1386,112 @@ class EngineArgs:
             "--weight-transfer-config", **vllm_kwargs["weight_transfer_config"]
         )
 
+        # Bidaw arguments
+        bidaw_group = parser.add_argument_group(
+            title="Bidaw",
+            description="Bidaw I/O-aware KV cache management for interactive LLM serving.",
+        )
+        bidaw_group.add_argument(
+            "--enable-bidaw",
+            action="store_true",
+            help="Enable Bidaw I/O-aware KV cache management.",
+        )
+        bidaw_group.add_argument(
+            "--enable-io-aware-scheduling",
+            action="store_true",
+            default=True,
+            help="Enable I/O-aware scheduling with dual queues and disk-HRRN scoring.",
+        )
+        bidaw_group.add_argument(
+            "--kv-size-unit",
+            type=float,
+            default=1e8,
+            help="KV cache size unit for scheduling (default: 1e8 tokens).",
+        )
+        bidaw_group.add_argument(
+            "--skip-oversize-requests",
+            action="store_true",
+            help="Skip requests that exceed available KV cache capacity.",
+        )
+        bidaw_group.add_argument(
+            "--enable-answer-length-eviction",
+            action="store_true",
+            default=True,
+            help="Enable Answer-Length-based Eviction (ALE) policy.",
+        )
+        bidaw_group.add_argument(
+            "--num-promising-buckets",
+            type=int,
+            default=20,
+            help="Number of buckets for answer-length prediction histogram.",
+        )
+        bidaw_group.add_argument(
+            "--eviction-threshold",
+            type=float,
+            default=0.05,
+            help="Minimum reuse distance threshold for eviction.",
+        )
+        bidaw_group.add_argument(
+            "--ghost-cache-history-size",
+            type=int,
+            default=10000,
+            help="Maximum number of entries in the ghost cache history.",
+        )
+        bidaw_group.add_argument(
+            "--enable-storage-efficient-tensor",
+            action="store_true",
+            default=True,
+            help="Enable storage-efficient tensor caching for KV reconstruction.",
+        )
+        bidaw_group.add_argument(
+            "--is-mha-model",
+            action="store_true",
+            default=True,
+            help="Indicate if the model uses multi-head attention.",
+        )
+        bidaw_group.add_argument(
+            "--transform-stream-priority",
+            type=int,
+            default=-1,
+            help="CUDA stream priority for tensor cache transform (-1 for low priority).",
+        )
+        bidaw_group.add_argument(
+            "--big-block-size",
+            type=int,
+            default=256,
+            help="Block size for large KV cache blocks.",
+        )
+        bidaw_group.add_argument(
+            "--small-block-size",
+            type=int,
+            default=16,
+            help="Block size for small KV cache blocks.",
+        )
+        bidaw_group.add_argument(
+            "--ssd-cache-dir",
+            type=str,
+            default="/tmp/bidaw_kv_cache",
+            help="Directory for SSD-backed KV cache storage.",
+        )
+        bidaw_group.add_argument(
+            "--ssd-io-threads",
+            type=int,
+            default=4,
+            help="Number of I/O threads for SSD cache operations.",
+        )
+        bidaw_group.add_argument(
+            "--enable-inclusive-caching",
+            action="store_true",
+            default=True,
+            help="Enable inclusive caching (keep blocks in upper tier when offloaded).",
+        )
+        bidaw_group.add_argument(
+            "--tensor-cache-memory-gb",
+            type=float,
+            default=0.0,
+            help="Memory budget in GB for tensor cache (0 = auto).",
+        )
+
         # Other arguments
         parser.add_argument(
             "--disable-log-stats",
@@ -1964,6 +2123,29 @@ class EngineArgs:
         if self.gdn_prefill_backend is not None:
             self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend
 
+        # Build BidawConfig from EngineArgs fields
+        bidaw_config = BidawConfig(
+            enable_bidaw=self.enable_bidaw,
+            enable_io_aware_scheduling=self.enable_io_aware_scheduling,
+            kv_size_unit=self.kv_size_unit,
+            skip_oversize_requests=self.skip_oversize_requests,
+            enable_answer_length_eviction=self.enable_answer_length_eviction,
+            num_promising_buckets=self.num_promising_buckets,
+            eviction_threshold=self.eviction_threshold,
+            ghost_cache_history_size=self.ghost_cache_history_size,
+            enable_storage_efficient_tensor=self.enable_storage_efficient_tensor,
+            is_mha_model=self.is_mha_model,
+            transform_stream_priority=self.transform_stream_priority,
+            big_block_size=self.big_block_size,
+            small_block_size=self.small_block_size,
+            ssd_cache_dir=self.ssd_cache_dir,
+            ssd_io_threads=self.ssd_io_threads,
+            enable_inclusive_caching=self.enable_inclusive_caching,
+            tensor_cache_memory_gb=self.tensor_cache_memory_gb,
+            tensor_parallel_size=self.tensor_parallel_size,
+            pipeline_parallel_size=self.pipeline_parallel_size,
+        )
+
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1989,6 +2171,7 @@ class EngineArgs:
             performance_mode=self.performance_mode,
             weight_transfer_config=self.weight_transfer_config,
             shutdown_timeout=self.shutdown_timeout,
+            bidaw_config=bidaw_config,
         )
 
         return config

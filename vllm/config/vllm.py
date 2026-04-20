@@ -28,6 +28,8 @@ from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
 
 from .attention import AttentionConfig
+from .bidaw import BidawConfig
+from .cache import CacheConfig
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
@@ -265,6 +267,8 @@ class VllmConfig:
         default_factory=SchedulerConfig.default_factory,
     )
     """Scheduler configuration."""
+    bidaw_config: BidawConfig = Field(default_factory=BidawConfig)
+    """Bidaw I/O-aware KV cache management configuration."""
     device_config: DeviceConfig = Field(default_factory=DeviceConfig)
     """Device configuration."""
     load_config: LoadConfig = Field(default_factory=LoadConfig)
@@ -380,6 +384,8 @@ class VllmConfig:
             vllm_factors.append(self.scheduler_config.compute_hash())
         else:
             vllm_factors.append("None")
+        if self.bidaw_config and self.bidaw_config.enable_bidaw:
+            vllm_factors.append(self.bidaw_config)
         if self.device_config:
             vllm_factors.append(self.device_config.compute_hash())
         else:
