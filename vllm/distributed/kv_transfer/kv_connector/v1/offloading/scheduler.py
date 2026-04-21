@@ -47,11 +47,20 @@ class OffloadingConnectorScheduler:
         # request blocks are stored in order
         # index of next block (of size offloaded_block_size) to offload
         self._next_stored_block_idx: dict[ReqId, int] = {}
+        # Deferred offloading: track blocks that need offloading at request finish
+        # req_id -> list of (block_ids, block_hashes) accumulated during generation
+        self._pending_offload_blocks: dict[ReqId, list[tuple[list[int], list[BlockHash]]]] = {}
+        # Deferred stores prepared at request_finished, to be submitted next step
+        # req_id -> TransferSpec
+        self._pending_stores: dict[ReqId, TransferSpec] = {}
         # if GPU prefix caching is enabled,
         # track loaded blocks to avoid redundant loads
         self._blocks_being_loaded: set[BlockHash] | None = (
             set() if spec.vllm_config.cache_config.enable_prefix_caching else None
         )
+
+        # Track requests awaiting GPU block free (finished sending)
+        self._reqs_awaiting_free: set[ReqId] = set()
 
         # request ID -> set(block hashes being stored/load)
         self._reqs_being_stored = defaultdict[ReqId, set[BlockHash]](set)
@@ -218,10 +227,19 @@ class OffloadingConnectorScheduler:
 
     def _get_reqs_to_store(self, scheduler_output: SchedulerOutput):
         reqs_to_store: dict[ReqId, TransferSpec] = {}
+        preempted_ids = scheduler_output.preempted_req_ids or set()
+        # Preempted requests: clean up tracking. Cannot offload since blocks
+        # are freed by the scheduler before connector meta is built.
+        for req_id in preempted_ids:
+            self._pending_offload_blocks.pop(req_id, None)
+            self._request_block_ids.pop(req_id, None)
+            self._next_stored_block_idx.pop(req_id, None)
+            self._reqs_being_stored.pop(req_id, None)
+
         # iterate over both new and cached requests
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
             if preempted:
-                self._request_block_ids[req_id] = []
+                continue  # Already handled above
 
             if new_block_id_groups:
                 new_block_ids = new_block_id_groups[0]
@@ -244,63 +262,47 @@ class OffloadingConnectorScheduler:
             num_gpu_blocks = num_blocks * self.block_size_factor
             assert len(req.block_hashes) >= num_gpu_blocks
 
+            # Collect new block hashes for deferred offloading
             new_block_hashes = list(self._get_block_hashes(
                 req, start_idx=start_block_idx, end_idx=num_blocks
             ))
-            logger.info(
-                "Request %s: %d new blocks to store (hashes: %s)",
-                req_id, num_new_blocks, new_block_hashes[:3],
-            )
-            store_output = self.manager.prepare_store(new_block_hashes)
-            if store_output is None:
-                logger.warning(
-                    "Request %s: cannot store %s blocks", req_id, num_new_blocks
-                )
-                continue
 
-            self._next_stored_block_idx[req_id] = num_blocks
+            # Track blocks for deferred offloading (at request finish time)
+            # instead of immediate offloading which causes I/O overhead
+            if req_id not in self._pending_offload_blocks:
+                self._pending_offload_blocks[req_id] = []
 
-            if not store_output.block_hashes_to_store:
-                continue
-            block_hashes_to_store = set(store_output.block_hashes_to_store)
-
-            block_hashes = self._get_block_hashes(req, end_idx=num_blocks)
-            self.manager.touch(block_hashes)
-
-            new_block_hashes = self._get_block_hashes(
-                req, start_idx=start_block_idx, end_idx=num_blocks
-            )
-            dst_spec = store_output.store_spec
+            # Accumulate block IDs and hashes for this batch
             src_block_ids: list[int] = []
             for idx, blk_hash in enumerate(new_block_hashes):
-                if blk_hash not in block_hashes_to_store:
-                    continue
                 offloaded_block_idx = start_block_idx + idx
                 gpu_block_idx = offloaded_block_idx * self.block_size_factor
                 for i in range(self.block_size_factor):
                     src_block_ids.append(block_ids[gpu_block_idx + i])
-            src_spec = GPULoadStoreSpec(
-                src_block_ids, group_sizes=(len(src_block_ids),)
-            )
+            self._pending_offload_blocks[req_id].append((src_block_ids, new_block_hashes))
 
-            reqs_to_store[req_id] = (src_spec, dst_spec)
-            self._reqs_being_stored[req_id] |= block_hashes_to_store
-
-            logger.debug(
-                "Request %s offloading %s blocks starting from block #%d",
-                req_id,
-                len(block_hashes_to_store),
-                start_block_idx,
-            )
+            self._next_stored_block_idx[req_id] = num_blocks
 
         return reqs_to_store
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
+        # Get normal stores from active requests (now empty due to deferred offloading)
+        reqs_to_store = self._get_reqs_to_store(scheduler_output)
+
+        # Include deferred stores from finished requests
+        if self._pending_stores:
+            reqs_to_store.update(self._pending_stores)
+            logger.info(
+                "Including %d deferred stores from finished requests",
+                len(self._pending_stores),
+            )
+            self._pending_stores.clear()
+
         meta = OffloadingConnectorMetadata(
             reqs_to_load=self._reqs_to_load,
-            reqs_to_store=self._get_reqs_to_store(scheduler_output),
+            reqs_to_store=reqs_to_store,
             reqs_to_flush=scheduler_output.preempted_req_ids,
         )
         self._reqs_to_load = {}
@@ -330,6 +332,12 @@ class OffloadingConnectorScheduler:
                 # ALE: record answer length when offload completes
                 if self._eviction_manager is not None:
                     self._record_answer_length(req_id)
+            # Clean up tracking for requests that had deferred offloading
+            if req_id in self._reqs_awaiting_free:
+                self._reqs_awaiting_free.discard(req_id)
+                self._requests.pop(req_id, None)
+                self._request_block_ids.pop(req_id, None)
+                self._next_stored_block_idx.pop(req_id, None)
 
         for req_id in connector_output.finished_recving or []:
             block_hashes = self._reqs_being_loaded.pop(req_id, None)
@@ -348,6 +356,8 @@ class OffloadingConnectorScheduler:
     ) -> tuple[bool, dict[str, Any] | None]:
         """
         Called when a request has finished, before its blocks are freed.
+        Triggers deferred offloading: blocks accumulated during generation
+        are offloaded to SSD now, when the request completes.
 
         Returns:
             True if the request is being saved/sent asynchronously and blocks
@@ -357,8 +367,6 @@ class OffloadingConnectorScheduler:
             returned by the engine.
         """
         req_id = request.request_id
-        self._requests.pop(req_id, None)
-        self._request_block_ids.pop(req_id, None)
 
         # ALE: record user_id mapping for multi-turn tracking
         if self._eviction_manager is not None:
@@ -369,12 +377,52 @@ class OffloadingConnectorScheduler:
             self._request_answer_lengths[req_id] = answer_len
             self._eviction_manager.on_answer_generated(user_id, answer_len)
 
-        # TODO(orozery): possibly kickoff offload for last block
-        # which may have been deferred due to async scheduling
-        self._next_stored_block_idx.pop(req_id, None)
+        # Trigger deferred offloading for finished request
+        pending = self._pending_offload_blocks.pop(req_id, None)
+        if pending:
+            # Flatten all pending blocks
+            all_block_ids: list[int] = []
+            all_block_hashes: list[BlockHash] = []
+            for batch_block_ids, batch_hashes in pending:
+                all_block_ids.extend(batch_block_ids)
+                all_block_hashes.extend(batch_hashes)
 
-        request_being_stored = req_id in self._reqs_being_stored
-        return request_being_stored, None
+            logger.info(
+                "Request %s finished: offloading %d deferred blocks",
+                req_id, len(all_block_hashes),
+            )
+
+            # Prepare store via manager
+            store_output = self.manager.prepare_store(all_block_hashes)
+            if store_output is not None and store_output.block_hashes_to_store:
+                block_hashes_to_store = set(store_output.block_hashes_to_store)
+                self.manager.touch(all_block_hashes)
+
+                # Filter block_ids to only those that need storing
+                final_src_ids: list[int] = []
+                for idx, bh in enumerate(all_block_hashes):
+                    if bh in block_hashes_to_store:
+                        gpu_idx = idx * self.block_size_factor
+                        for i in range(self.block_size_factor):
+                            if gpu_idx + i < len(all_block_ids):
+                                final_src_ids.append(all_block_ids[gpu_idx + i])
+
+                if final_src_ids:
+                    dst_spec = store_output.store_spec
+                    src_spec = GPULoadStoreSpec(
+                        final_src_ids, group_sizes=(len(final_src_ids),)
+                    )
+                    self._pending_stores[req_id] = (src_spec, dst_spec)
+                    self._reqs_being_stored[req_id] = block_hashes_to_store
+                    # Track request for cleanup after store completes
+                    self._reqs_awaiting_free.add(req_id)
+                    return True, None
+
+        # No pending blocks or already stored — can free immediately
+        self._requests.pop(req_id, None)
+        self._request_block_ids.pop(req_id, None)
+        self._next_stored_block_idx.pop(req_id, None)
+        return False, None
 
     def _record_answer_length(self, req_id: ReqId) -> None:
         """Record answer length for ALE tracking when offload completes."""

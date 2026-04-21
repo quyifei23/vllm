@@ -162,6 +162,23 @@ class EngineCore:
         else:
             self.bidaw_scheduler = None
 
+        # Setup Bidaw mixed-granularity block allocator when enabled.
+        self.bidaw_block_allocator = None
+        if vllm_config.bidaw_config.enable_bidaw:
+            from vllm.bidaw import BidawBlockAllocator
+
+            self.bidaw_block_allocator = BidawBlockAllocator(
+                block_pool=self.scheduler.kv_cache_manager.block_pool,
+                big_block_size=vllm_config.bidaw_config.big_block_size,
+                small_block_size=vllm_config.bidaw_config.small_block_size,
+            )
+            logger.info(
+                "Bidaw mixed-granularity block allocator enabled: "
+                "big_block_size=%d, small_block_size=%d",
+                vllm_config.bidaw_config.big_block_size,
+                vllm_config.bidaw_config.small_block_size,
+            )
+
         self.use_spec_decode = vllm_config.speculative_config is not None
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore

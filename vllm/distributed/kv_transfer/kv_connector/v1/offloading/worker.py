@@ -308,8 +308,13 @@ class OffloadingConnectorWorker:
                 self.worker.wait(job_ids)
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
+        logger.info(
+            "start_kv_transfers: %d deferred store jobs, %d reqs to load",
+            len(self._unsubmitted_store_jobs), len(metadata.reqs_to_load),
+        )
         for job_id, transfer_spec in self._unsubmitted_store_jobs:
             success = self.worker.transfer_async(job_id, transfer_spec)
+            logger.info("  Submitted store job %d: success=%s", job_id, success)
             assert success
         self._unsubmitted_store_jobs.clear()
 
@@ -326,6 +331,12 @@ class OffloadingConnectorWorker:
             job_id = self._generate_job_id()
             self._jobs[job_id] = (req_id, True)
             self._store_jobs[req_id].add(job_id)
+            src, dst = transfer_spec
+            logger.info(
+                "Worker prepare_store: req=%s job=%d src_medium=%s dst_medium=%s src_blocks=%s",
+                req_id, job_id, src.medium(), dst.medium(),
+                len(src.block_ids) if hasattr(src, 'block_ids') else 'N/A',
+            )
             # NOTE(orozery): defer the store to the beginning of the next engine step,
             # so that offloading starts AFTER transfers related to token sampling,
             # thereby avoiding delays to token generation due to offloading.
@@ -346,7 +357,15 @@ class OffloadingConnectorWorker:
         for transfer_result in self.worker.get_finished():
             # we currently do not support job failures
             job_id = transfer_result.job_id
-            assert transfer_result.success
+            if not transfer_result.success:
+                logger.warning(
+                    "Transfer job %d for request %s failed. "
+                    "Continuing without this transfer.",
+                    job_id,
+                    self._jobs.get(job_id, ("unknown", "unknown"))[0],
+                )
+                self._jobs.pop(job_id, None)
+                continue
             req_id, store = self._jobs.pop(job_id)
             if (
                 transfer_result.transfer_time

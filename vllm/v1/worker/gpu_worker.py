@@ -524,26 +524,9 @@ class Worker(WorkerBase):
         # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
         # because `initialize_kv_cache` will inject kv cache groups not
         # related to kv cache connector (e.g. kv cache sharing layers).
+        # Bidaw's kv_transfer_config is already set in create_engine_config()
+        # when enable_bidaw=True, so no need to configure it here.
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
-
-        # Configure Bidaw SSD offloading when enabled.
-        if self.vllm_config.bidaw_config.enable_bidaw:
-            if self.vllm_config.kv_transfer_config is None:
-                from vllm.config.kv_transfer import KVTransferConfig
-
-                self.vllm_config.kv_transfer_config = KVTransferConfig()
-            self.vllm_config.kv_transfer_config.kv_connector = "OffloadingConnector"
-            self.vllm_config.kv_transfer_config.kv_connector_extra_config[
-                "spec_name"
-            ] = "BidawOffloadingSpec"
-            # OffloadingConnector doesn't support HMA
-            self.vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = True
-            self.vllm_config.kv_transfer_config.kv_connector_extra_config.update(
-                {
-                    "ssd_cache_dir": self.vllm_config.bidaw_config.ssd_cache_dir,
-                    "ssd_io_threads": self.vllm_config.bidaw_config.ssd_io_threads,
-                }
-            )
 
         if self.vllm_config.model_config.enable_sleep_mode:
             from vllm.device_allocator.cumem import CuMemAllocator

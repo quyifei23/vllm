@@ -50,7 +50,9 @@ class SSDDirectionHandler(OffloadingHandler):
     """
     Handles transfers in a single direction (GPU->SSD or SSD->GPU).
 
-    Uses a thread pool for file I/O and CUDA streams for GPU memory operations.
+    Uses a thread pool for I/O operations.
+    GPU->CPU copies are done synchronously within the transfer thread,
+    then files are written inline to avoid pool exhaustion.
     """
 
     def __init__(
@@ -115,19 +117,50 @@ class SSDDirectionHandler(OffloadingHandler):
     ) -> None:
         """Write KV data from GPU memory to SSD files."""
         try:
-            # Get GPU tensors from kv_caches
-            for tensor_data in self._kv_caches.tensors:
-                gpu_tensor = tensor_data.tensor
-                # Pin memory for efficient transfer
-                if not gpu_tensor.is_pinned():
-                    gpu_tensor = gpu_tensor.pin_memory()
+            tensor_infos = []
+            for td in self._kv_caches.tensors:
+                tensor_infos.append(td.tensor.view(torch.int8))
 
-                # For each block path in the SSD spec, write the corresponding data
-                for block_hash, file_path in dst_spec.block_paths.items():
-                    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                    # Write tensor data to SSD file
-                    self._write_block_to_ssd(gpu_tensor, file_path)
-                    transfer.num_bytes += os.path.getsize(file_path)
+            block_ids = src_spec.block_ids
+            if len(block_ids) == 0:
+                transfer.success = True
+                transfer.done_event.set()
+                return
+
+            file_paths = list(dst_spec.block_paths.values())
+            assert len(file_paths) == len(block_ids), (
+                f"block_paths count ({len(file_paths)}) != block_ids count ({len(block_ids)})"
+            )
+
+            num_blocks = len(block_ids)
+            per_block_size = sum(t.shape[1] for t in tensor_infos)
+
+            tensor_offsets = []
+            offset = 0
+            for t in tensor_infos:
+                tensor_offsets.append(offset)
+                offset += t.shape[1]
+
+            # Batch GPU->CPU copy for all blocks into one contiguous pinned tensor
+            src = torch.empty(
+                (num_blocks, per_block_size),
+                dtype=torch.int8,
+                device="cpu",
+                pin_memory=True,
+            )
+            for i, block_id in enumerate(block_ids):
+                for j, tensor in enumerate(tensor_infos):
+                    s = tensor_offsets[j]
+                    e = s + tensor.shape[1]
+                    src[i, s:e].copy_(tensor[int(block_id)])
+
+            # Write files sequentially (avoid re-submitting to pool - deadlock risk)
+            for i in range(num_blocks):
+                dir_path = os.path.dirname(file_paths[i])
+                if dir_path and not os.path.exists(dir_path):
+                    os.makedirs(dir_path, exist_ok=True)
+                src[i].numpy().tofile(file_paths[i])
+                transfer.num_bytes += os.path.getsize(file_paths[i])
 
             transfer.success = True
         except Exception as e:
@@ -154,19 +187,54 @@ class SSDDirectionHandler(OffloadingHandler):
     ) -> None:
         """Read KV data from SSD files to GPU memory."""
         try:
-            for tensor_data in self._kv_caches.tensors:
-                gpu_tensor = tensor_data.tensor
+            tensor_infos = []
+            for td in self._kv_caches.tensors:
+                tensor_infos.append(td.tensor.view(torch.int8))
 
-                for block_hash, file_path in src_spec.block_paths.items():
-                    if not os.path.exists(file_path):
-                        logger.warning("SSD block file not found: %s", file_path)
-                        transfer.success = False
-                        transfer.done_event.set()
-                        return
+            file_paths = list(src_spec.block_paths.values())
+            block_ids = dst_spec.block_ids
+            if len(block_ids) == 0:
+                transfer.success = True
+                transfer.done_event.set()
+                return
 
-                    # Read tensor data from SSD file
-                    self._read_block_from_ssd(gpu_tensor, file_path)
-                    transfer.num_bytes += os.path.getsize(file_path)
+            assert len(file_paths) == len(block_ids), (
+                f"block_paths count ({len(file_paths)}) != block_ids count ({len(block_ids)})"
+            )
+
+            tensor_offsets = []
+            offset = 0
+            for t in tensor_infos:
+                tensor_offsets.append(offset)
+                offset += t.shape[1]
+
+            per_block_size = offset
+
+            # Pre-allocate pinned buffer for reads
+            buf = torch.empty(
+                per_block_size,
+                dtype=torch.int8,
+                device="cpu",
+                pin_memory=True,
+            )
+
+            for i, block_id in enumerate(block_ids):
+                file_path = file_paths[i]
+                if not os.path.exists(file_path):
+                    logger.warning("SSD block file not found: %s", file_path)
+                    transfer.success = False
+                    transfer.done_event.set()
+                    return
+
+                data = torch.frombuffer(memoryview(open(file_path, "rb").read()), dtype=torch.int8)
+                file_size = len(data)
+                transfer.num_bytes += file_size
+
+                # Split and copy to GPU
+                for j, tensor in enumerate(tensor_infos):
+                    s = tensor_offsets[j]
+                    e = s + tensor.shape[1]
+                    tensor[int(block_id)].copy_(data[s:e].cuda())
 
             transfer.success = True
         except Exception as e:
@@ -184,20 +252,6 @@ class SSDDirectionHandler(OffloadingHandler):
                         transfer_type=transfer.transfer_type,
                     )
                 )
-
-    def _write_block_to_ssd(self, gpu_tensor: torch.Tensor, file_path: str) -> None:
-        """Write a GPU tensor block to an SSD file."""
-        # Copy to CPU first
-        cpu_tensor = gpu_tensor.cpu()
-        # Write to file
-        torch.save(cpu_tensor, file_path)
-
-    def _read_block_from_ssd(self, gpu_tensor: torch.Tensor, file_path: str) -> None:
-        """Read an SSD file into GPU tensor."""
-        # Load from file to CPU
-        cpu_tensor = torch.load(file_path, weights_only=False)
-        # Copy to GPU
-        gpu_tensor.copy_(cpu_tensor)
 
     def get_finished(self) -> list[TransferResult]:
         """Return newly finished transfers."""

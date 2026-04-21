@@ -65,10 +65,18 @@ class BidawOffloadingSpec(OffloadingSpec):
     def _get_or_create_eviction_manager(self) -> BidawEvictionManager:
         """Lazily create the eviction manager."""
         if self._eviction_manager is None:
-            # Estimate performance layer size from GPU memory config
             cache_config = self.vllm_config.cache_config
-            num_gpu_blocks = cache_config.num_gpu_blocks
-            perf_layer_size = num_gpu_blocks * cache_config.gpu_block_size_bytes
+            model_config = self.vllm_config.model_config
+            parallel_config = self.vllm_config.parallel_config
+            num_gpu_blocks = cache_config.num_gpu_blocks or 1000
+            block_size = cache_config.block_size
+            hidden_size = model_config.get_hidden_size()
+            num_layers = model_config.get_num_layers(parallel_config)
+            import torch
+            dtype_bytes = torch.tensor([], dtype=model_config.dtype).element_size()
+            bytes_per_token = 2 * num_layers * hidden_size * dtype_bytes
+            perf_layer_size = num_gpu_blocks * block_size * bytes_per_token
+
             self._eviction_manager = BidawEvictionManager(
                 config=self._bidaw_config,
                 perf_layer_size_bytes=perf_layer_size,

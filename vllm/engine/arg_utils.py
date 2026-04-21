@@ -2146,6 +2146,21 @@ class EngineArgs:
             pipeline_parallel_size=self.pipeline_parallel_size,
         )
 
+        # When Bidaw is enabled, auto-configure kv_transfer_config if not
+        # already provided by the user.
+        if bidaw_config.enable_bidaw and self.kv_transfer_config is None:
+            self.kv_transfer_config = KVTransferConfig(
+                kv_connector="OffloadingConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={
+                    "spec_name": "BidawOffloadingSpec",
+                    "ssd_cache_dir": bidaw_config.ssd_cache_dir,
+                    "ssd_io_threads": bidaw_config.ssd_io_threads,
+                },
+            )
+            # OffloadingConnector doesn't support HMA
+            scheduler_config.disable_hybrid_kv_cache_manager = True
+
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,

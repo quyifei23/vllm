@@ -78,7 +78,7 @@ class BidawConfig:
     ssd_cache_dir: str = "/tmp/bidaw_kv_cache"
     """Directory for SSD-based KV cache (capacity layer)."""
 
-    ssd_io_threads: int = 4
+    ssd_io_threads: int = 16
     """Number of threads for async SSD I/O operations."""
 
     # ── Inclusive Caching (§4) ─────────────────────────────────────

@@ -151,15 +151,15 @@ def load_workload(path: str, max_requests: int = 0) -> list[dict]:
 
 # ── Baseline Benchmark ────────────────────────────────────────────────
 
-def run_baseline(model_path: str, workload: list[dict]) -> list[RequestMetric]:
+def run_baseline(model_path: str, workload: list[dict], max_num_seqs: int = 16, gpu_memory_utilization: float = 0.85) -> list[RequestMetric]:
     """Run vLLM baseline (no Bidaw)."""
     from vllm import LLM, SamplingParams
 
     print(f"  Creating vLLM engine (baseline)...")
     llm = LLM(
         model=model_path,
-        max_num_seqs=16,
-        gpu_memory_utilization=0.85,
+        max_num_seqs=max_num_seqs,
+        gpu_memory_utilization=gpu_memory_utilization,
         disable_log_stats=False,
     )
     print(f"  Engine ready")
@@ -202,15 +202,15 @@ def run_baseline(model_path: str, workload: list[dict]) -> list[RequestMetric]:
 
 # ── Bidaw Benchmark ───────────────────────────────────────────────────
 
-def run_bidaw(model_path: str, workload: list[dict], ssd_cache_dir: str) -> list[RequestMetric]:
+def run_bidaw(model_path: str, workload: list[dict], ssd_cache_dir: str, max_num_seqs: int = 16, gpu_memory_utilization: float = 0.85) -> list[RequestMetric]:
     """Run vLLM with Bidaw enabled."""
     from vllm import LLM, SamplingParams
 
     print(f"  Creating vLLM engine (Bidaw)...")
     llm = LLM(
         model=model_path,
-        max_num_seqs=16,
-        gpu_memory_utilization=0.85,
+        max_num_seqs=max_num_seqs,
+        gpu_memory_utilization=gpu_memory_utilization,
         enable_bidaw=True,
         ssd_cache_dir=ssd_cache_dir,
         disable_log_stats=False,
@@ -260,6 +260,8 @@ def main():
     parser.add_argument("--model", type=str, default="/root/autodl-fs/model/OPT-6.7B")
     parser.add_argument("--workload", type=str, default="data/sharegpt_workload.json")
     parser.add_argument("--max-requests", type=int, default=50)
+    parser.add_argument("--max-num-seqs", type=int, default=16, help="Maximum concurrent sequences")
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.85, help="GPU memory utilization (0.0-1.0)")
     parser.add_argument("--ssd-cache-dir", type=str, default="/tmp/bidaw_e2e_test")
     parser.add_argument("--baseline", action="store_true", help="Run baseline only")
     parser.add_argument("--enable-bidaw", action="store_true", help="Run Bidaw only")
@@ -289,7 +291,11 @@ def main():
     if args.compare or args.baseline:
         label = "[1/2]" if args.compare else "[1/1]"
         print(f"\n{label} Running Baseline (vLLM without Bidaw)...")
-        baseline_metrics, baseline_time = run_baseline(args.model, workload)
+        baseline_metrics, baseline_time = run_baseline(
+            args.model, workload,
+            max_num_seqs=args.max_num_seqs,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+        )
         result = compute_result("vLLM Baseline", args.model, baseline_metrics, baseline_time)
         results.append(result)
         print(result.summary())
@@ -297,7 +303,11 @@ def main():
     if args.compare or args.enable_bidaw:
         label = "[2/2]" if args.compare else "[1/1]"
         print(f"\n{label} Running Bidaw (vLLM with Bidaw)...")
-        bidaw_metrics, bidaw_time = run_bidaw(args.model, workload, args.ssd_cache_dir)
+        bidaw_metrics, bidaw_time = run_bidaw(
+            args.model, workload, args.ssd_cache_dir,
+            max_num_seqs=args.max_num_seqs,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+        )
         result = compute_result("Bidaw I/O-Aware", args.model, bidaw_metrics, bidaw_time)
         results.append(result)
         print(result.summary())
