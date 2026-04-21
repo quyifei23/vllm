@@ -17,17 +17,23 @@
 
 
 class WeightedReuseDistanceTracker:
-    """追踪每个用户 KV 的 weighted reuse distance 历史分布。
+    """追踪系统中所有 KV 访问的 weighted reuse distance 分布。
 
-    WRD 定义：两次访问同一用户 KV 之间，其他用户 KV 的总访问大小（字节）。
-    记录每个 user_id 的 WRD 分布（直方图），用于预测该用户未来是否可能被再次访问。
+    WRD 定义：两次访问同一用户 KV 之间，其他用户被访问到的**不重复** KV 的总大小（字节）。
+    如果用户 B 的 KV 在中间被访问了 3 次，WRD 只计一次 B 的 KV 大小。
+    物理含义：中间隔了多少"不同的"数据把当前用户的 KV 挤出了缓存。
 
-    注意：ghost cache 中记录的是 User 级别的 KV Cache 访问 trace，
-    同一 User 的多轮对话映射到一个 user_id。
+    注意：
+    - 记录的是全局 WRD 分布，不按用户分开
+    - get_distribution() 返回全局 WRD 频率直方图，用于 Ghost Cache 的 Belady 模拟
+    - 按用户的 WRD 预测由 AnswerLengthReusePredictor 负责
     """
 
     def on_kv_accessed(self, user_id, kv_size_bytes):
-        """记录一次 KV 访问事件，更新该用户的 WRD 分布。
+        """记录一次 KV 访问事件，计算并记录当前产生的 WRD 值到全局分布。
+
+        WRD = 自上次访问该用户 KV 以来，其他用户被访问到的不重复 KV 总大小。
+        首次访问无 WRD。
 
         Args:
             user_id: 用户唯一标识
@@ -35,20 +41,29 @@ class WeightedReuseDistanceTracker:
         """
         pass
 
-    def get_distribution(self, user_id):
-        """获取指定用户 KV 的 WRD 历史分布（直方图）。
+    def get_distribution(self):
+        """获取全局 WRD 频率分布（直方图）。
 
-        Returns:
-            WRD 分布数组，长度为 num_promising_buckets。
+        返回 num_promising_buckets 个桶，每个桶记录 WRD 落在该区间的总次数。
+        用于 Ghost Cache 模拟："系统中任意 KV 的 WRD 有多大可能性落在某个区间？"
         """
         pass
 
 
 class AnswerLengthReusePredictor:
-    """维护 answer_length → WRD 下界的统计关系。
+    """学习 answer_length → WRD 的映射关系，预测下一轮 WRD。
 
-    对于每个用户，统计其历史生成的答案长度（tokens）与对应的 WRD 下界，
-    以便在当前轮次生成答案后，预测下一轮次该用户 KV 的 reuse 可能性。
+    核心思路：用户本轮生成的答案越长，其 KV 占用的缓存越多，
+    在下一轮回来之前更可能被其他数据挤出缓存（WRD 更大）。
+
+    实现方式：
+    - 记录历史每轮对话的 (answer_length, 实际发生的 WRD) 配对
+    - 对相同 answer_length 区间的 WRD 做统计（中位数/均值）
+    - 预测时，查表得到给定 answer_length 对应的 WRD 估计值
+
+    注意：这与 WeightedReuseDistanceTracker 不同：
+    - Tracker 记录实际发生的 WRD 频率分布 → 给 Ghost Cache 做 Belady 模拟
+    - Predictor 通过 answer_length 预测下一轮 WRD → 给驱逐决策用
     """
 
     def on_answer_generated(self, user_id, answer_length, wrd):
