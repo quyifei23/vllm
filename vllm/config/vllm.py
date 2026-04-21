@@ -28,6 +28,7 @@ from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
 
 from .attention import AttentionConfig
+from vllm.bidaw.config import BidawConfig
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
@@ -273,6 +274,8 @@ class VllmConfig:
     """Model weight offloading configuration."""
     attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
     """Attention configuration."""
+    bidaw_config: BidawConfig = Field(default_factory=BidawConfig)
+    """Bidaw KV cache offloading configuration."""
     kernel_config: KernelConfig = Field(default_factory=KernelConfig)
     """Kernel configuration."""
     lora_config: LoRAConfig | None = None
