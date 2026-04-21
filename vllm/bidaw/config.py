@@ -68,17 +68,6 @@ class BidawConfig:
     enable_storage_efficient_tensor: bool = True
     """是否启用存储高效张量缓存（缓存 normalized activation 而非 KV tensor）。"""
 
-    # ── 混合粒度 GPU 内存分配 ────────────────────────────────────
-    big_block_size: int = 256
-    """混合粒度分配中大块的大小（tokens），用于历史对话和 query。
-    论文 §4。
-    """
-
-    small_block_size: int = 16
-    """混合粒度分配中小块的大小（tokens），用于 response（长度不可预测）。
-    论文 §4。
-    """
-
     # ── SSD 存储路径 ─────────────────────────────────────────────
     ssd_cache_dir: str = "/tmp/bidaw_kv_cache"
     """SSD 容量层的缓存路径。"""
@@ -97,8 +86,6 @@ class BidawConfig:
             "eviction_threshold": self.eviction_threshold,
             "ghost_cache_history_size": self.ghost_cache_history_size,
             "enable_storage_efficient_tensor": self.enable_storage_efficient_tensor,
-            "big_block_size": self.big_block_size,
-            "small_block_size": self.small_block_size,
             "ssd_cache_dir": self.ssd_cache_dir,
         }
         data = json.dumps(params, sort_keys=True).encode()
