@@ -70,6 +70,7 @@ class Request:
         cache_salt: str | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
+        user_id: str | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
         resumable: bool = False,
         reasoning_ended: bool | None = None,
@@ -77,6 +78,9 @@ class Request:
         self.request_id = request_id
         self.client_index = client_index
         self.priority = priority
+        # user_id groups related requests (e.g., multi-turn conversation).
+        # Falls back to request_id for ALE eviction when not provided.
+        self.user_id = user_id if user_id is not None else request_id
         self.sampling_params = sampling_params
         self.pooling_params = pooling_params
         self.lora_request = lora_request
@@ -195,6 +199,7 @@ class Request:
             cache_salt=request.cache_salt,
             priority=request.priority,
             trace_headers=request.trace_headers,
+            user_id=getattr(request, "user_id", None),
             block_hasher=block_hasher,
             resumable=request.resumable,
             reasoning_ended=request.reasoning_ended,

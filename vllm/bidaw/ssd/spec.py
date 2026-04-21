@@ -18,6 +18,8 @@ from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import CanonicalKVCaches, OffloadingSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
+from vllm.bidaw.ale import BidawEvictionManager
+from vllm.bidaw.config import BidawConfig
 from vllm.bidaw.ssd.manager import BidawOffloadingManager
 from vllm.bidaw.ssd.mediums import SSDLoadStoreSpec
 from vllm.bidaw.ssd.worker import SSDGPUOffloadingHandler
@@ -51,10 +53,27 @@ class BidawOffloadingSpec(OffloadingSpec):
         self._tp_rank = parallel_config.rank // parallel_config.pipeline_parallel_size
         self._pp_rank = parallel_config.rank % parallel_config.pipeline_parallel_size
 
+        # Bidaw config
+        self._bidaw_config = vllm_config.bidaw_config
+
         # scheduler-side
         self._manager: BidawOffloadingManager | None = None
+        self._eviction_manager: BidawEvictionManager | None = None
         # worker-side
         self._handler: SSDGPUOffloadingHandler | None = None
+
+    def _get_or_create_eviction_manager(self) -> BidawEvictionManager:
+        """Lazily create the eviction manager."""
+        if self._eviction_manager is None:
+            # Estimate performance layer size from GPU memory config
+            cache_config = self.vllm_config.cache_config
+            num_gpu_blocks = cache_config.num_gpu_blocks
+            perf_layer_size = num_gpu_blocks * cache_config.gpu_block_size_bytes
+            self._eviction_manager = BidawEvictionManager(
+                config=self._bidaw_config,
+                perf_layer_size_bytes=perf_layer_size,
+            )
+        return self._eviction_manager
 
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
@@ -62,15 +81,27 @@ class BidawOffloadingSpec(OffloadingSpec):
             enable_events = (
                 kv_events_config is not None and kv_events_config.enable_kv_cache_events
             )
+
+            eviction_manager = None
+            if self._bidaw_config.enable_answer_length_eviction:
+                eviction_manager = self._get_or_create_eviction_manager()
+
             self._manager = BidawOffloadingManager(
                 ssd_cache_dir=self._ssd_cache_dir,
                 ssd_io_threads=self._ssd_io_threads,
                 max_blocks=self._max_ssd_blocks,
                 tp_rank=self._tp_rank,
                 pp_rank=self._pp_rank,
+                eviction_manager=eviction_manager,
                 enable_events=enable_events,
             )
         return self._manager
+
+    def get_eviction_manager(self) -> BidawEvictionManager | None:
+        """Return the ALE eviction manager for scheduler-side tracking."""
+        if self._bidaw_config.enable_answer_length_eviction:
+            return self._get_or_create_eviction_manager()
+        return None
 
     def get_handlers(
         self, kv_caches: CanonicalKVCaches

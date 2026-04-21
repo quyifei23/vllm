@@ -3,7 +3,7 @@
 from collections import defaultdict
 from collections.abc import Iterable
 from itertools import islice
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
@@ -22,6 +22,9 @@ from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.worker import TransferSpec
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
+
+if TYPE_CHECKING:
+    from vllm.bidaw.ale import BidawEvictionManager
 
 logger = init_logger(__name__)
 
@@ -53,6 +56,28 @@ class OffloadingConnectorScheduler:
         # request ID -> set(block hashes being stored/load)
         self._reqs_being_stored = defaultdict[ReqId, set[BlockHash]](set)
         self._reqs_being_loaded = defaultdict[ReqId, set[BlockHash]](set)
+
+        # Bidaw ALE: track answer lengths per request for eviction decisions
+        self._request_answer_lengths: dict[ReqId, int] = {}
+        # Bidaw: derived user_id buckets for ALE eviction (request_id hash → user bucket)
+        self._request_user_map: dict[ReqId, str] = {}
+
+        # Bidaw config (set by BidawOffloadingSpec if enabled)
+        self._bidaw_config = getattr(spec, "_bidaw_config", None)
+        self._gpu_block_size_bytes = 0  # Set later during KV cache registration
+
+        # Bidaw ALE eviction manager (from BidawOffloadingSpec)
+        self._eviction_manager: BidawEvictionManager | None = getattr(
+            spec, "get_eviction_manager", lambda: None
+        )()
+
+        # Track whether we've initialized the block size in bytes
+        self._block_size_bytes_initialized = False
+
+    def _derive_user_id(self, request_id: ReqId) -> str:
+        """Derive a user bucket ID from request_id for ALE eviction."""
+        # Hash request_id to one of 100 user buckets
+        return f"user_{hash(request_id) % 100}"
 
     def _get_block_hashes(
         self,
@@ -219,8 +244,12 @@ class OffloadingConnectorScheduler:
             num_gpu_blocks = num_blocks * self.block_size_factor
             assert len(req.block_hashes) >= num_gpu_blocks
 
-            new_block_hashes = self._get_block_hashes(
+            new_block_hashes = list(self._get_block_hashes(
                 req, start_idx=start_block_idx, end_idx=num_blocks
+            ))
+            logger.info(
+                "Request %s: %d new blocks to store (hashes: %s)",
+                req_id, num_new_blocks, new_block_hashes[:3],
             )
             store_output = self.manager.prepare_store(new_block_hashes)
             if store_output is None:
@@ -298,6 +327,9 @@ class OffloadingConnectorScheduler:
             block_hashes = self._reqs_being_stored.pop(req_id, None)
             if block_hashes:
                 self.manager.complete_store(block_hashes)
+                # ALE: record answer length when offload completes
+                if self._eviction_manager is not None:
+                    self._record_answer_length(req_id)
 
         for req_id in connector_output.finished_recving or []:
             block_hashes = self._reqs_being_loaded.pop(req_id, None)
@@ -305,6 +337,9 @@ class OffloadingConnectorScheduler:
                 if self._blocks_being_loaded:
                     self._blocks_being_loaded.difference_update(block_hashes)
                 self.manager.complete_load(block_hashes)
+                # ALE: record KV access for reuse distance tracking
+                if self._eviction_manager is not None:
+                    self._record_kv_access(req_id)
 
     def request_finished(
         self,
@@ -325,12 +360,47 @@ class OffloadingConnectorScheduler:
         self._requests.pop(req_id, None)
         self._request_block_ids.pop(req_id, None)
 
+        # ALE: record user_id mapping for multi-turn tracking
+        if self._eviction_manager is not None:
+            user_id = getattr(request, "user_id", None) or self._derive_user_id(req_id)
+            self._request_user_map[req_id] = user_id
+            # Record answer length if available
+            answer_len = len(request._output_token_ids) if hasattr(request, "_output_token_ids") else 0
+            self._request_answer_lengths[req_id] = answer_len
+            self._eviction_manager.on_answer_generated(user_id, answer_len)
+
         # TODO(orozery): possibly kickoff offload for last block
         # which may have been deferred due to async scheduling
         self._next_stored_block_idx.pop(req_id, None)
 
         request_being_stored = req_id in self._reqs_being_stored
         return request_being_stored, None
+
+    def _record_answer_length(self, req_id: ReqId) -> None:
+        """Record answer length for ALE tracking when offload completes."""
+        if self._eviction_manager is None:
+            return
+        user_id = self._request_user_map.get(req_id, self._derive_user_id(req_id))
+        answer_len = self._request_answer_lengths.get(req_id, 0)
+        self._eviction_manager.on_answer_generated(user_id, answer_len)
+
+    def _record_kv_access(self, req_id: ReqId) -> None:
+        """Record KV access for ALE tracking when load completes."""
+        if self._eviction_manager is None:
+            return
+        req = self._requests.get(req_id)
+        if req is None:
+            return
+        user_id = self._request_user_map.get(req_id, self._derive_user_id(req_id))
+        kv_size = self._estimate_req_kv_size(req)
+        self._eviction_manager.on_kv_accessed(user_id, kv_size)
+
+    def _estimate_req_kv_size(self, request: Request) -> int:
+        """Estimate KV cache size for a request in bytes."""
+        num_tokens = request.num_tokens if hasattr(request, "num_tokens") else request.num_prompt_tokens
+        # Approximate: 2 layers * hidden_size * dtype_bytes per token
+        # Using ~100 bytes/token as a rough estimate
+        return num_tokens * 100
 
     def take_events(self) -> Iterable[KVCacheEvent]:
         """Take the KV cache events from the connector.
